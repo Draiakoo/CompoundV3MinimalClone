@@ -57,7 +57,10 @@ contract CompoundV3 {
         // Accrue indices
         accureInternal();
         
-
+        UserInfo memory userInfo = userInfos[msg.sender];
+        int104 principal = userInfo.principal;
+        // Unsafe cast to int256
+        int256 balance = presentValue(supplyInterestRate, principal) + int256(amount);
     }
 
     function supplyCollateral(uint256 amount) external {}
@@ -97,8 +100,8 @@ contract CompoundV3 {
     }
 
     function getUtilization() public view returns(uint256){
-        uint256 totalSupply = presentValue(supplyInterestRate, totalSupplyBase);
-        uint256 totalSBorrow = presentValue(borrowInterestRate, totalBorrowBase);
+        uint256 totalSupply = presentValueSupply(supplyInterestRate, totalSupplyBase);
+        uint256 totalSBorrow = presentValueBorrow(borrowInterestRate, totalBorrowBase);
         if(totalSupply == 0){
             return 0;
         } else {
@@ -107,6 +110,14 @@ contract CompoundV3 {
     }
 
     function presentValue(uint256 interestRate, uint256 principalValue) internal pure returns(uint256){
+        return principalValue * interestRate / 1 ether;
+    }
+
+    function presentValueSupply(uint256 interestRate, uint256 principalValue) internal pure returns(uint256){
+        return principalValue * interestRate / 1 ether;
+    }
+
+    function presentValueBorrow(uint256 interestRate, uint256 principalValue) internal pure returns(uint256){
         return principalValue * interestRate / 1 ether;
     }
 
