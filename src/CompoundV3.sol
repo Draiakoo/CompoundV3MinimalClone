@@ -9,6 +9,8 @@ struct AssetInfo {
     address priceFeed;
     uint8 offset;
     uint256 borrowCollateralFactor;
+    uint256 liquidateCollateralFactor;
+    uint256 liquidationFactor;
     uint256 totalDeposited;
 }
 
@@ -165,7 +167,53 @@ contract CompoundV3 {
         IERC20(_token).safeTransfer(msg.sender, _amount);
     }
 
-    function absorb(address[] calldata _accounts) external {}
+    function absorb(address[] calldata _accounts) external {
+        accrueInternal();
+
+        for(uint256 i; i < _accounts.length; ++i){
+            address accountToLiquidate = _accounts[i];
+            if(!isLiquidatable(accountToLiquidate)) revert();
+
+            UserInfo memory accountUser = userInfos[accountToLiquidate];
+            int256 oldPrincipal = accountUser.principal;
+            int256 oldBalance = presentValue(oldPrincipal);
+            uint16 assetsIn = accountUser.assetsIn;
+
+            uint256 basePrice = getPrice(baseTokenPriceFeed);
+            uint256 deltaValue = 0;
+
+            for(uint8 j; j < 16; ++j){
+                if(assetsIn & (uint16(1) << j) != 0){
+                    address tokenAddress = indexToToken[j];
+                    AssetInfo memory assetInfo = tokenInfos[tokenAddress];
+                    uint256 seizeAmount = collaterals[accountToLiquidate][tokenAddress];
+                    collaterals[accountToLiquidate][tokenAddress] = 0;
+                    tokenInfos[tokenAddress].totalDeposited -= seizeAmount;
+
+                    uint256 value = seizeAmount * getPrice(assetInfo.priceFeed) / 1 ether;
+                    deltaValue += value * assetInfo.liquidationFactor / 1 ether;
+                }
+            }
+
+            uint256 deltaBalance = deltaValue * 1 ether / basePrice;
+            int256 newBalance = oldBalance + int256(deltaBalance);
+            if(newBalance < 0){
+                newBalance = 0;
+            }
+
+            int256 newPrincipal = principalValue(newBalance);
+            userInfos[accountToLiquidate].principal = newPrincipal;
+            userInfos[accountToLiquidate].assetsIn = 0;
+
+            (uint256 repaidAmount, uint256 suppliedAmount) = repayAndSupplyAmount(oldPrincipal, newPrincipal);
+
+            totalSupplyBase += suppliedAmount;
+            totalBorrowBase -= repaidAmount;
+
+            uint256 basePaidOut = uint256(newBalance - oldBalance);
+            uint256 valueOfBasePaidOut = basePaidOut * basePrice / 1 ether;
+        }
+    }
 
     function buyCollateral(address _token, uint256 minAmount, uint256 baseAmount) external {}
 
@@ -201,6 +249,32 @@ contract CompoundV3 {
         }
 
         return borrowAmountToFulfill >= 0;
+    }
+
+    function isLiquidatable(address _user) internal view returns(bool){
+        int256 principal = userInfos[_user].principal;
+
+        if(principal >= 0){
+            return false;
+        }
+
+        uint16 assetsIn = userInfos[_user].assetsIn;
+        int256 borrowAmountToFulfill = presentValue(principal) * int256(getPrice(baseTokenPriceFeed)) / 1 ether;
+
+        for(uint8 i; i < 16; ++i){
+            if(assetsIn & (uint16(1) << i) != 0){
+                if(borrowAmountToFulfill >= 0){
+                    return false;
+                }
+
+                address tokenAddress = indexToToken[i];
+                AssetInfo memory asset = tokenInfos[tokenAddress];
+                uint256 newAmount = collaterals[_user][tokenAddress] * getPrice(asset.priceFeed) / 1 ether;
+                borrowAmountToFulfill += int256(newAmount * asset.liquidateCollateralFactor / 1 ether);
+            }
+        }
+
+        return borrowAmountToFulfill < 0;
     }
 
     function repayAndSupplyAmount(int256 oldPrincipal, int256 newPrincipal) internal pure returns(uint256, uint256){
